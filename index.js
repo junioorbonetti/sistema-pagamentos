@@ -49,6 +49,11 @@ function verificarLogin(req, res, next) {
   else res.redirect('/login');
 }
 
+app.get('/', (req, res) => {
+  res.redirect('/login');
+});
+
+
 app.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'views/login.html'));
 });
