@@ -2,6 +2,7 @@ const express = require('express');
 const session = require('express-session');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
+const fetch = require('node-fetch');
 
 const app = express();
 const PORT = 3000;
@@ -22,11 +23,10 @@ const db = new sqlite3.Database('./db.sqlite', (err) => {
   db.run(`CREATE TABLE IF NOT EXISTS clientes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
-    status TEXT NOT NULL,
-    criado_por TEXT,
-    criado_em TEXT,
-    alterado_por TEXT,
-    alterado_em TEXT
+    device TEXT,
+    valor TEXT,
+    obs TEXT,
+    status TEXT NOT NULL
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS usuarios (
@@ -78,12 +78,17 @@ app.get('/painel', verificarLogin, (req, res) => {
     } else {
       let html = `
       <link rel="stylesheet" href="/style.css">
-      <h2>Painel de Clientes</h2>
-      <a href="/logout">Sair</a>`;
-      if (req.session.nivel === 'admin') {
-        html += ` | <a href="/usuarios">Gerenciar Usuários</a>`;
-      }
-      html += `<ul>`;
+      <div class="painel-clientes">
+        <header>
+          <h1>Clientes</h1>
+          <div>
+            <a href="/logout">Sair</a>
+            ${req.session.nivel === 'admin' ? '<a href="/usuarios">Gerenciar Usuários</a>' : ''}
+            ${req.session.nivel === 'admin' ? '<button onclick="abrirModal()">Novo Cliente</button>' : ''}
+            ${req.session.nivel === 'admin' ? '<button onclick="forcarVerificacao()">Forçar Verificação</button>' : ''}
+          </div>
+        </header>
+        <ul>`;
 
       rows.forEach(cliente => {
         html += `
@@ -91,69 +96,93 @@ app.get('/painel', verificarLogin, (req, res) => {
           <span class="${cliente.status === 'pago' ? 'status-pago' : 'status-nao'}">
             ${cliente.nome} - ${cliente.status.toUpperCase()}
           </span>
-          <div style="font-size:12px;">
-            Criado por: ${cliente.criado_por || '-'} em ${cliente.criado_em || '-'}<br>
-            Última alteração: ${cliente.alterado_por || '-'} em ${cliente.alterado_em || '-'}
+          <div class="cliente-detalhes">
+            Device: ${cliente.device || '-'}<br>
+            Valor: ${cliente.valor || '-'}<br>
+            OBS: ${cliente.obs || '-'}<br>
           </div>`;
 
         if (req.session.nivel === 'admin') {
           html += `
-          <div>
+          <div class="cliente-acoes">
             <a href="/toggle/${cliente.id}">[Alternar]</a>
-            <a href="/editar/${cliente.id}">[Editar]</a>
-            <a href="/deletar/${cliente.id}">[Deletar]</a>
+            <a href="/editar-cliente/${cliente.id}">[Editar]</a>
+            <a href="/deletar-cliente/${cliente.id}">[Deletar]</a>
           </div>`;
         }
 
         html += `</li>`;
       });
 
-      html += `</ul>`;
+      html += `</ul></div>`;
 
       if (req.session.nivel === 'admin') {
         html += `
-        <form method="post" action="/novo-cliente">
-          <input name="nome" placeholder="Novo cliente" required>
-          <button>Adicionar</button>
-        </form>`;
+        <div id="modal" class="modal">
+          <form class="modal-content" id="formNovoCliente" method="POST" action="/novo-cliente">
+            <h3>Novo Cliente</h3>
+            <input name="nome" placeholder="Nome" required>
+            <input name="device" placeholder="Device">
+            <input name="valor" placeholder="Valor">
+            <input name="obs" placeholder="Observações">
+            <button type="submit">Adicionar</button>
+            <button type="button" onclick="fecharModal()">Cancelar</button>
+          </form>
+        </div>`;
       }
+
+      html += `
+      <script>
+        function forcarVerificacao() {
+          fetch('/forcar-verificacao')
+            .then(res => {
+              if (res.ok) {
+                location.reload();
+              } else {
+                alert('Erro ao verificar');
+              }
+            })
+            .catch(err => {
+              alert('Erro ao chamar API');
+              console.error(err);
+            });
+        }
+        function abrirModal() {
+          document.getElementById('modal').style.display = 'block';
+        }
+        function fecharModal() {
+          document.getElementById('modal').style.display = 'none';
+        }
+      </script>`;
 
       res.send(html);
     }
   });
 });
 
-app.post('/novo-cliente', verificarLogin, (req, res) => {
-  if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
-  const nome = req.body.nome;
-  const agora = new Date().toLocaleString();
-  db.run(`INSERT INTO clientes (nome, status, criado_por, criado_em, alterado_por, alterado_em)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-    [nome, 'nao-pago', req.session.usuario, agora, req.session.usuario, agora],
-    () => res.redirect('/painel'));
-});
-
 app.get('/toggle/:id', verificarLogin, (req, res) => {
   if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
   const id = req.params.id;
-  const agora = new Date().toLocaleString();
   db.get('SELECT status FROM clientes WHERE id = ?', [id], (err, row) => {
     if (!row) return res.redirect('/painel');
     const novoStatus = row.status === 'pago' ? 'nao-pago' : 'pago';
-    db.run(`UPDATE clientes SET status = ?, alterado_por = ?, alterado_em = ? WHERE id = ?`,
-      [novoStatus, req.session.usuario, agora, id],
-      () => res.redirect('/painel'));
+    db.run('UPDATE clientes SET status = ? WHERE id = ?', [novoStatus, id], () => {
+      res.redirect('/painel');
+    });
   });
 });
 
-app.get('/editar/:id', verificarLogin, (req, res) => {
+app.get('/editar-cliente/:id', verificarLogin, (req, res) => {
   if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
   const id = req.params.id;
   db.get('SELECT * FROM clientes WHERE id = ?', [id], (err, row) => {
     if (!row) return res.redirect('/painel');
     res.send(`
-      <form method="post" action="/editar/${id}">
+      <form method="post" action="/editar-cliente/${id}">
         <input name="nome" value="${row.nome}" required>
+        <input name="device" value="${row.device || ''}" placeholder="Device">
+        <input name="valor" value="${row.valor || ''}" placeholder="Valor">
+        <input name="obs" value="${row.obs || ''}" placeholder="Observações">
         <button type="submit">Salvar</button>
       </form>
       <a href="/painel">Cancelar</a>
@@ -161,22 +190,27 @@ app.get('/editar/:id', verificarLogin, (req, res) => {
   });
 });
 
-app.post('/editar/:id', verificarLogin, (req, res) => {
+app.post('/editar-cliente/:id', verificarLogin, (req, res) => {
   if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
   const id = req.params.id;
-  const nome = req.body.nome;
-  const agora = new Date().toLocaleString();
-  db.run('UPDATE clientes SET nome = ?, alterado_por = ?, alterado_em = ? WHERE id = ?',
-    [nome, req.session.usuario, agora, id],
+  const { nome, device, valor, obs } = req.body;
+  db.run('UPDATE clientes SET nome = ?, device = ?, valor = ?, obs = ? WHERE id = ?',
+    [nome, device, valor, obs, id],
     () => res.redirect('/painel'));
 });
 
-app.get('/deletar/:id', verificarLogin, (req, res) => {
+app.post('/novo-cliente', verificarLogin, (req, res) => {
   if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
-  const id = req.params.id;
-  db.run('DELETE FROM clientes WHERE id = ?', [id], () => {
-    res.redirect('/painel');
-  });
+  const { nome, device, valor, obs } = req.body;
+  db.run(`INSERT INTO clientes (nome, device, valor, obs, status) VALUES (?, ?, ?, ?, ?)`,
+    [nome, device, valor, obs, 'nao-pago'],
+    function(err) {
+      if (err) {
+        console.error(err.message);
+        return res.status(500).send('Erro ao adicionar cliente.');
+      }
+      res.redirect('/painel');
+    });
 });
 
 app.get('/usuarios', verificarLogin, (req, res) => {
@@ -185,9 +219,15 @@ app.get('/usuarios', verificarLogin, (req, res) => {
   db.all('SELECT * FROM usuarios', [], (err, rows) => {
     let html = `
       <link rel="stylesheet" href="/style.css">
-      <h2>Gerenciar Usuários</h2>
-      <a href="/painel">Voltar</a>
-      <ul>`;
+      <div class="painel-clientes">
+        <header>
+          <h1>Usuários</h1>
+          <div>
+            <a href="/painel">Voltar</a>
+            <button onclick="abrirModalUsuario()">Novo Usuário</button>
+          </div>
+        </header>
+        <ul>`;
 
     rows.forEach(user => {
       html += `<li>
@@ -196,16 +236,30 @@ app.get('/usuarios', verificarLogin, (req, res) => {
       </li>`;
     });
 
-    html += `</ul>
-    <form method="post" action="/criar-usuario">
-      <input name="nome" placeholder="Novo usuário" required>
-      <input name="senha" placeholder="Senha" required>
-      <select name="nivel">
-        <option value="normal">Normal</option>
-        <option value="admin">Admin</option>
-      </select>
-      <button>Criar</button>
-    </form>`;
+    html += `</ul></div>
+
+    <div id="modalUsuario" class="modal">
+      <form class="modal-content" method="POST" action="/criar-usuario">
+        <h3>Novo Usuário</h3>
+        <input name="nome" placeholder="Nome" required>
+        <input name="senha" type="password" placeholder="Senha" required>
+        <select name="nivel">
+          <option value="normal">Normal</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button type="submit">Criar</button>
+        <button type="button" onclick="fecharModalUsuario()">Cancelar</button>
+      </form>
+    </div>
+
+    <script>
+      function abrirModalUsuario() {
+        document.getElementById('modalUsuario').style.display = 'block';
+      }
+      function fecharModalUsuario() {
+        document.getElementById('modalUsuario').style.display = 'none';
+      }
+    </script>`;
 
     res.send(html);
   });
@@ -214,8 +268,8 @@ app.get('/usuarios', verificarLogin, (req, res) => {
 app.post('/criar-usuario', verificarLogin, (req, res) => {
   if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
   const { nome, senha, nivel } = req.body;
-
-  db.run('INSERT INTO usuarios (nome, senha, nivel) VALUES (?, ?, ?)', [nome, senha, nivel], () => {
+  db.run('INSERT INTO usuarios (nome, senha, nivel) VALUES (?, ?, ?)', [nome, senha, nivel], (err) => {
+    if (err) return res.send('Erro ao criar usuário.');
     res.redirect('/usuarios');
   });
 });
@@ -226,6 +280,43 @@ app.get('/excluir-usuario/:id', verificarLogin, (req, res) => {
   db.run('DELETE FROM usuarios WHERE id = ?', [id], () => {
     res.redirect('/usuarios');
   });
+});
+
+app.get('/deletar-cliente/:id', verificarLogin, (req, res) => {
+  if (req.session.nivel !== 'admin') return res.send('Acesso negado.');
+  const id = req.params.id;
+  db.run('DELETE FROM clientes WHERE id = ?', [id], () => {
+    res.redirect('/painel');
+  });
+});
+
+async function consultarPagamentosFakeBofa() {
+  try {
+    const res = await fetch('http://localhost:4000/transacoes');
+    const transacoes = await res.json();
+
+    transacoes.forEach(transacao => {
+      db.get('SELECT * FROM clientes WHERE nome = ?', [transacao.nome], (err, row) => {
+        if (row && row.status !== 'pago') {
+          db.run('UPDATE clientes SET status = ? WHERE id = ?', 
+            ['pago', row.id],
+            () => console.log(`Atualizado: ${transacao.nome}`));
+        }
+      });
+    });
+
+  } catch (err) {
+    console.error('Erro ao consultar Fake BofA:', err.message);
+  }
+}
+
+app.get('/forcar-verificacao', verificarLogin, async (req, res) => {
+  try {
+    await consultarPagamentosFakeBofa();
+    res.sendStatus(200);
+  } catch (err) {
+    res.status(500).send('Erro ao consultar API fake.');
+  }
 });
 
 app.listen(PORT, () => {
